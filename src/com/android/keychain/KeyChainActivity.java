@@ -64,6 +64,10 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 import javax.security.auth.x500.X500Principal;
+import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+
+
+import android.widget.Toast;
 
 public class KeyChainActivity extends Activity {
     private static final String TAG = "KeyChain";
@@ -76,11 +80,21 @@ public class KeyChainActivity extends Activity {
 
     private PendingIntent mSender;
 
+     AlertDialog mDialog;
+
+    private AliasLoader loader;
+
     // beware that some of these KeyStore operations such as saw and
     // get do file I/O in the remote keystore process and while they
     // do not cause StrictMode violations, they logically should not
     // be done on the UI thread.
     private KeyStore mKeyStore = KeyStore.getInstance();
+    @Override
+    protected void onCreate(Bundle savedState) {
+        super.onCreate(savedState);
+        getWindow().addSystemFlags(SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS);
+    }
+
 
     @Override public void onResume() {
         super.onResume();
@@ -134,8 +148,7 @@ public class KeyChainActivity extends Activity {
             issuers = new ArrayList<byte[]>();
         }
 
-        final AliasLoader loader = new AliasLoader(mKeyStore, this, keyInfoProvider,
-                new CertificateParametersFilter(mKeyStore, keyTypes, issuers));
+        loader = new AliasLoader(mKeyStore, this, keyInfoProvider, new CertificateParametersFilter(mKeyStore, keyTypes, issuers));
         loader.execute();
 
         final IKeyChainAliasCallback.Stub callback = new IKeyChainAliasCallback.Stub() {
@@ -150,6 +163,7 @@ public class KeyChainActivity extends Activity {
                 final CertificateAdapter certAdapter;
                 try {
                     certAdapter = loader.get();
+                    loader = null;
                 } catch (InterruptedException | ExecutionException e) {
                     Log.e(TAG, "Loading certificate aliases interrupted", e);
                     finish(null);
@@ -159,7 +173,12 @@ public class KeyChainActivity extends Activity {
                  * If there are no keys for the user to choose from, do not display
                  * the dialog. This is in line with what other operating systems do.
                  */
-                if (!certAdapter.hasKeysToChoose()) {
+                if ((certAdapter == null) || !certAdapter.hasKeysToChoose()) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            Toast.makeText(certAdapter.mContext, R.string.title_no_certs, Toast.LENGTH_SHORT).show();
+                        }
+                    });
                     finish(null);
                     return;
                 }
@@ -268,6 +287,7 @@ public class KeyChainActivity extends Activity {
                                       ? Collections.<String>emptyList()
                                       : Arrays.asList(aliasArray));
 
+            if(isCancelled()) return null;
             return new CertificateAdapter(mKeyStore, mContext,
                     rawAliasList.stream().filter(mInfoProvider::isUserSelectable)
                     .filter(mCertificateFilter::shouldPresentCertificate)
@@ -327,12 +347,12 @@ public class KeyChainActivity extends Activity {
         }
         builder.setTitle(title);
         builder.setSingleChoiceItems(adapter, selectedItem, null);
-        final AlertDialog dialog = builder.create();
+        mDialog = builder.create();
 
         // Show text above the list to explain what the certificate will be used for.
         TextView contextView = (TextView) View.inflate(this, R.layout.cert_chooser_header, null);
 
-        final ListView lv = dialog.getListView();
+        final ListView lv = mDialog.getListView();
         lv.addHeaderView(contextView, null, false);
         lv.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
@@ -340,7 +360,7 @@ public class KeyChainActivity extends Activity {
                     // Header. Just text; ignore clicks.
                     return;
                 } else {
-                    dialog.getButton(DialogInterface.BUTTON_POSITIVE).setEnabled(true);
+                    mDialog.getButton(DialogInterface.BUTTON_POSITIVE).setEnabled(true);
                     lv.setItemChecked(position, true);
                     adapter.notifyDataSetChanged();
                 }
@@ -374,19 +394,32 @@ public class KeyChainActivity extends Activity {
         contextView.setText(contextMessage);
 
         if (selectedItem == -1) {
-            dialog.setOnShowListener(new DialogInterface.OnShowListener() {
+            mDialog.setOnShowListener(new DialogInterface.OnShowListener() {
                 @Override
                 public void onShow(DialogInterface dialogInterface) {
-                     dialog.getButton(DialogInterface.BUTTON_POSITIVE).setEnabled(false);
+                     mDialog.getButton(DialogInterface.BUTTON_POSITIVE).setEnabled(false);
                 }
             });
         }
-        dialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
+        mDialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
             @Override public void onCancel(DialogInterface dialog) {
                 finish(null);
             }
         });
-        dialog.show();
+        
+        mDialog.create();
+        // Prevents screen overlay attack.
+        mDialog.getButton(DialogInterface.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
+        mDialog.show();
+    }
+
+    @Override
+    public void onDestroy() {
+        if(mDialog != null && mDialog.isShowing())
+            mDialog.dismiss();
+        if(loader != null)
+            loader.cancel(true);
+        super.onDestroy();
     }
 
     @VisibleForTesting
